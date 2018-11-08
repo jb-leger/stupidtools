@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+
+# Copyright (c) 2018 Jean-Benoist Leger <jb@leger.tf>
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+# 1. Redistributions of source code must retain the above copyright notice,
+#    this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
+import re
+import os
+import sys
+import pathlib
+import argparse
+import tempfile
+import subprocess
+from lxml import etree
+
+def extract_svg_layers(fin, layers, verbose):
+
+    found_layers = []
+
+    with open(fin, "rb") as f:
+        tree = etree.fromstring(f.read())
+
+    ns = tree.nsmap[None]
+    nsinkscape = tree.nsmap["inkscape"]
+    g = "{%s}g" % ns
+    groupmode = "{%s}groupmode" % nsinkscape
+    label = "{%s}label" % nsinkscape
+
+    todelete = []
+    for element in tree.iter():
+        if g != element.tag:
+            continue
+        if groupmode not in element.attrib:
+            continue
+        if element.attrib[groupmode] != "layer":
+            continue
+        if label not in element.attrib:
+            continue
+        layername = element.attrib[label]
+        found_layers.append(layername)
+        if verbose:
+            print(f"Layer {layername}: ", end="", file=sys.stderr)
+        if layername in layers:
+            element.attrib["style"] = "display:inline"
+            if verbose:
+                print("displayed", file=sys.stderr)
+        else:
+            todelete.append((element.getparent(), element))
+            if verbose:
+                print("removed", file=sys.stderr)
+
+    for parent, elem in todelete:
+        parent.remove(elem)
+
+    notfoundlayers = set(layers).difference(set(found_layers))
+    if len(notfoundlayers) > 0:
+        print("Layers not found: " + ", ".join(notfoundlayers), file=sys.stderr)
+        sys.exit(1)
+
+    return etree.tounicode(tree, method="xml", pretty_print=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="display specified layers in inkscape svg, remove other layers. "
+        "Output in svg, pdf, png"
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file name. (default is constructed with orignal file name and layers)",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "-q", "--quiet", help="Quiet mode", default=False, action="store_true"
+    )
+    parser.add_argument(
+        "-f",
+        "--format",
+        help="Output format (svg, pdf, png). Default: svg.",
+        type=str,
+        default="svg",
+    )
+    parser.add_argument(
+        "-v", "--verbose", help="Verbose mode", default=False, action="store_true"
+    )
+    parser.add_argument("-i", "--input", type=str, help="Input file name")
+    parser.add_argument("layers", type=str, nargs="*", help="Layers to display")
+    parser.add_argument(
+        "-a",
+        "--auto",
+        default=False,
+        action="store_true",
+        help="Automatic mode. Output file must be provided."
+        " For example, with a output file like rabbit_gp_tt.pdf"
+        " then the input filename is set to rabbit.svg if --input not set, only the layers"
+        " named gp and tt are extracted if layers are not provided to the"
+        " command line, and the output format is set to pdf if --format not"
+        " profided.",
+    )
+
+    args = parser.parse_args()
+
+    if args.quiet and args.verbose:
+        args.verbose = False
+
+    if args.auto:
+        if args.output is None:
+            print(
+                f"Output filename must be provided in automatic mode", file=sys.stderr
+            )
+            sys.exit(1)
+        a = re.match("((?:.*/)?[^_]+)_([^/]*)\.(pdf|png|svg)", args.output)
+        if not a:
+            print(f"Output filename unparsable", file=sys.stderr)
+            sys.exit(1)
+        base, layers_, form = a.groups()
+
+        if args.input is None:
+            args.input = base + ".svg"
+        if len(args.layers) == 0:
+            args.layers = layers_.split("_")
+        args.format = form
+
+    if args.format not in ("svg", "png", "pdf"):
+        print("Unkown format", file=sys.stderr)
+        sys.exit(1)
+
+    fninput = args.input
+    if args.output is None:
+        p = pathlib.Path(fninput)
+        finput = str(p.with_suffix(""))
+        foutput = finput + "_" + "_".join(l.replace(" ", "") for l in args.layers)
+        fnoutput = str(pathlib.Path(foutput).with_suffix("." + args.format))
+    else:
+        fnoutput = args.output
+    if not args.quiet:
+        print(f"Output file: {fnoutput}", file=sys.stderr)
+
+    svg = extract_svg_layers(fninput, args.layers, verbose=args.verbose)
+
+    if args.format == "svg":
+        with open(fnoutput, "w") as f:
+            f.write(svg)
+    else:
+        with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as f:
+            f.write(svg.encode())
+            svgfile = f.name
+
+        if args.verbose:
+            print(f"Temp svg: {svgfile}")
+        cmd = ["inkscape", "-z"]
+        if args.format == "pdf":
+            cmd.append("-A")
+        if args.format == "png":
+            cmd.append("-e")
+        cmd.append(fnoutput)
+        cmd.append(svgfile)
+        if args.verbose:
+            print("Run: " + " ".join(cmd))
+        subprocess.call(cmd)
+        if args.verbose:
+            print(f"Delete: {svgfile}")
+        os.remove(svgfile)
+
+
+if __name__ == "__main__":
+    main()
