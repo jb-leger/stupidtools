@@ -26,11 +26,30 @@
 
 import subprocess
 import argparse
+import textwrap
 import sys
 
 
 def parseargs():
-    parser = argparse.ArgumentParser(description="Rewrite pdf with ghostscript.")
+    parser = argparse.ArgumentParser(
+        description="Rewrite pdf with ghostscript.",
+        epilog=textwrap.dedent(
+            """\
+            Examples:
+            compress a pdf with default config:
+              %(prog)s input.pdf output.pdf
+            compress a pdf with low quality:
+              %(prog)s -q screen input.pdf output.pdf
+            convert all fonts to paths (for a stupid printer):
+              %(prog)s -n input.pdf output.pdf
+            rasterize the pdf with printer quality (for a very stupid printer):
+              %(prog)s -rq printer input.pdf output.pdf
+            compress and resize a pdf to A5 format:
+              %(prog)s -s a5 input.pdf output.pdf
+            """
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
         "-d",
         "--debug",
@@ -46,6 +65,9 @@ def parseargs():
         action="store_true",
         default=False,
         help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--version", action="version", version="", help=argparse.SUPPRESS
     )
     parser.add_argument(
         "-e",
@@ -70,7 +92,7 @@ def parseargs():
         "--resize",
         dest="size",
         help="Resize to the requested papersize."
-        " Must be one of paper sizes known to Ghostscript. (e.g. a4, a5, letter…)",
+        " Must be one of paper sizes known to Ghostscript. (e.g. a4, a5, letter...)",
     )
     nofont_or_rasterize = parser.add_mutually_exclusive_group()
     nofont_or_rasterize.add_argument(
