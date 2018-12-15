@@ -1,0 +1,175 @@
+#!/usr/bin/python3
+
+# Copyright (c) 2014-2018 Jean-Benoist Leger <jb@leger.tf>
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+# 1. Redistributions of source code must retain the above copyright notice,
+#    this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
+import subprocess
+import collections
+import sys
+import argparse
+
+
+class GpgKey:
+    def __init__(self, validity, ownertrust):
+        self.validity = validity
+        self.ownertrust = ownertrust
+        self.signed_by = []
+
+    def append_signed_by(self, kid):
+        if not kid in self.signed_by:
+            self.signed_by.append(kid)
+
+
+def get_pubs_and_sigs(gpg_exec):
+    so = subprocess.Popen(
+        [gpg_exec, "--no-auto-check-trustdb", "--list-sigs", "--with-colons"],
+        stdout=subprocess.PIPE,
+    )
+
+    last_pub_seen = ""
+    keys = {}
+    while True:
+        one_line = so.stdout.readline()
+        if one_line == b"":
+            break
+        splitted_line = one_line.split(b":")
+
+        if splitted_line[0] == b"pub":
+            validity = splitted_line[1].decode("utf8")
+            ownertrust = splitted_line[8].decode("utf8")
+            last_pub_seen = splitted_line[4].decode("utf8")
+            keys[last_pub_seen] = GpgKey(validity, ownertrust)
+
+        if splitted_line[0] == b"sig":
+            kid = splitted_line[4].decode("utf8")
+            keys[last_pub_seen].append_signed_by(kid)
+
+    return keys
+
+
+def gen_list_of_keys(gpg_keys, ultimate_needed, full_needed, marginal_needed):
+    signature_counts = collections.defaultdict(lambda: [0, 0, 0])
+
+    for k in gpg_keys.items():
+        kid = k[0]
+        key = k[1]
+        if key.validity in ["u", "f"]:
+            for sfk in key.signed_by:
+                if key.ownertrust == "u":
+                    signature_counts[sfk][0] += 1
+                if key.ownertrust == "f":
+                    signature_counts[sfk][1] += 1
+                if key.ownertrust == "m":
+                    signature_counts[sfk][2] += 1
+
+    keys_we_want = []
+    for sc in signature_counts.items():
+        kid = sc[0]
+        counts = sc[1]
+        if counts[0] >= ultimate_needed:
+            keys_we_want.append(kid)
+        if counts[0] + counts[1] >= full_needed:
+            keys_we_want.append(kid)
+        if counts[0] + counts[1] + counts[2] >= marginal_needed:
+            keys_we_want.append(kid)
+
+    missing_keys_we_want = list(set(keys_we_want) - set(gpg_keys.keys()))
+    return missing_keys_we_want
+
+
+def recv_keys(gpg_exec, keys, nb_max_recv_per_cmd, verbose):
+
+    for t in range(0, len(keys), nb_max_recv_per_cmd):
+        gnupg_cmd = [gpg_exec, "--no-auto-check-trustdb", "--recv-keys"]
+        if not verbose:
+            gnupg_cmd.append("--quiet")
+        gnupg_cmd.extend(keys[t : (t + nb_max_recv_per_cmd)])
+        subprocess.call(gnupg_cmd)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Recveive OpenPGP keys which are succeptible to appear "
+        "in web of trust",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "-v", '--verbose', dest="verbose", action="store_true", help="Verbose mode."
+    )
+    parser.add_argument(
+        "-g", "--gpg", dest="gpg_exec", default="gpg2", help="Command to execute gpg."
+    )
+    parser.add_argument(
+        "-u",
+        dest="sigs_on_ultimately_ownertrust_needed",
+        default=1,
+        type=int,
+        help="Minimal number of sigs a key did to ultimately ownertrusted keys "
+        "to be imported.",
+    )
+    parser.add_argument(
+        "-f",
+        dest="sigs_on_fully_ownertrust_needed",
+        default=1,
+        type=int,
+        help="Minimal number of sigs a key did to fully ownertrusted keys to "
+        "be imported.",
+    )
+    parser.add_argument(
+        "-m",
+        dest="sigs_on_marginally_ownertrust_needed",
+        default=2,
+        type=int,
+        help="Minimal number of sigs a key did to marginally ownertrusted keys "
+        "to be imported.",
+    )
+    parser.add_argument(
+        "-N",
+        dest="max_recv_keys_by_cmd",
+        default=25,
+        type=int,
+        help="Maximum number of keys received by a single gnupg invocation.",
+    )
+    args = parser.parse_args()
+
+    if args.verbose:
+        print("-> Reading all keys and sigs from keyring", file=sys.stderr)
+    gpg_keys = get_pubs_and_sigs(args.gpg_exec)
+
+    if args.verbose:
+        print("-> Computing missing keys", file=sys.stderr)
+    missing_keys = gen_list_of_keys(
+        gpg_keys,
+        args.sigs_on_ultimately_ownertrust_needed,
+        args.sigs_on_fully_ownertrust_needed,
+        args.sigs_on_marginally_ownertrust_needed,
+    )
+
+    if args.verbose:
+        print("-> Receiving %d keys" % len(missing_keys), file=sys.stderr)
+    recv_keys(args.gpg_exec, missing_keys, args.max_recv_keys_by_cmd, args.verbose)
+
+
+if __name__ == "__main__":
+    main()
