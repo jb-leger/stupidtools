@@ -33,6 +33,7 @@ import tempfile
 import subprocess
 from lxml import etree
 
+
 def extract_svg_layers(fin, layers, verbose):
 
     found_layers = []
@@ -73,7 +74,7 @@ def extract_svg_layers(fin, layers, verbose):
         parent.remove(elem)
 
     notfoundlayers = set(layers).difference(set(found_layers))
-    if len(notfoundlayers) > 0:
+    if notfoundlayers:
         print("Layers not found: " + ", ".join(notfoundlayers), file=sys.stderr)
         sys.exit(1)
 
