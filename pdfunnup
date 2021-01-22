@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+
+import subprocess as sp
+import re
+import os
+import tempfile
+import shutil
+import sys
+
+import rewrite_pdf
+
+def unnup(infile, outfile):
+    d = tempfile.mkdtemp()
+
+    rinfile = d+os.sep+"input.pdf"
+    rewrite_pdf.rewrite(infile, rinfile)
+    
+    pagesize=0
+    pages=0
+    for l in sp.run(('pdfinfo',rinfile),capture_output=True).stdout.decode().split('\n'):
+        a = re.match(r'^Page size:\s+(\d+)\sx\s(\d+)\spts', l)
+        if a:
+            l,h = a.groups()
+            pagesize = max(int(l),int(h))
+        b = re.match(r'^Pages:\s+(\d+)', l)
+        if b:
+            p, = b.groups()
+            pages = int(p)
+    
+    with open(d+os.sep+'output.tex','w') as f:
+        print(r"\documentclass[a4paper]{article}", file=f)
+        print(r"\usepackage{pdfpages}", file=f)
+        print(r"\begin{document}", file=f)
+        for i in range(1, pages+1):
+            print(fr"\includepdf[pages={i},clip,trim=0 0 {pagesize/2:.0f} 0]"+"{input.pdf}", file=f)
+            print(fr"\includepdf[pages={i},clip,trim={pagesize/2:.0f} 0 0 0]"+"{input.pdf}", file=f)
+        print(r"\end{document}", file=f)
+
+    sp.run(('pdflatex', 'output.tex'), cwd=d)
+    shutil.copyfile(d+os.sep+'output.pdf', outfile)
+    shutil.rmtree(d)
+    
+if __name__=='__main__':
+    if len(sys.argv)<3:
+        print(f"Usage: {sys.argv[0]} infile.pdf outfile.pdf", file=sys.stderr)
+        sys.exit()
+    unnup(sys.argv[1], sys.argv[2])
+
